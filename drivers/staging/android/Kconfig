@@ -89,6 +89,12 @@ config ANDROID_INTF_ALARM_DEV
 	  elapsed realtime, and a non-wakeup alarm on the monotonic clock.
 	  Also exports the alarm interface to user-space.
 
+config ANDROID_PIPE
+	tristate "Android virtual device for QEMU pipes"
+	---help---
+	  This is a virtual device to drive the QEMU pipe interface used by
+	  the Android Virtual Device.
+
 config SYNC
 	bool "Synchronization framework"
 	default n

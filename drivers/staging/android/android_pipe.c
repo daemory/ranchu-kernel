@@ -47,6 +47,7 @@
 
 #include <linux/module.h>
 #include <linux/interrupt.h>
+#include <linux/of.h>
 #include <linux/kernel.h>
 #include <linux/spinlock.h>
 #include <linux/miscdevice.h>
@@ -59,7 +60,7 @@
 
 /*
  * IMPORTANT: The following constants must match the ones used and defined
- * in external/qemu/hw/goldfish_pipe.c in the Android source tree.
+ * in external/qemu/hw/misc/android_pipe.c in the Android source tree.
  */
 
 /* pipe device registers */
@@ -97,13 +98,13 @@
 /* The following commands are related to read operations, they must be
  * listed in the same order than the corresponding write ones, since we
  * will use (CMD_READ_BUFFER - CMD_WRITE_BUFFER) as a special offset
- * in goldfish_pipe_read_write() below.
+ * in android_pipe_read_write() below.
  */
 #define CMD_READ_BUFFER        6  /* receive a user buffer from the emulator */
 #define CMD_WAKE_ON_READ       7  /* tell the emulator to wake us when reading
 				   * is possible */
 
-/* Possible status values used to signal errors - see goldfish_pipe_error_convert */
+/* Possible status values used to signal errors - see android_pipe_error_convert */
 #define PIPE_ERROR_INVAL       -1
 #define PIPE_ERROR_AGAIN       -2
 #define PIPE_ERROR_NOMEM       -3
@@ -128,18 +129,18 @@ struct access_params {
  * communicate with the emulator, and a wake queue for blocked tasks
  * waiting to be awoken.
  */
-struct goldfish_pipe_dev {
+struct android_pipe_dev {
 	spinlock_t lock;
 	unsigned char __iomem *base;
 	struct access_params *aps;
 	int irq;
 };
 
-static struct goldfish_pipe_dev   pipe_dev[1];
+static struct android_pipe_dev   pipe_dev[1];
 
 /* This data type models a given pipe instance */
-struct goldfish_pipe {
-	struct goldfish_pipe_dev *dev;
+struct android_pipe {
+	struct android_pipe_dev *dev;
 	struct mutex lock;
 	unsigned long flags;
 	wait_queue_head_t wake_queue;
@@ -154,11 +155,11 @@ enum {
 };
 
 
-static u32 goldfish_cmd_status(struct goldfish_pipe *pipe, u32 cmd)
-{ 
+static u32 android_cmd_status(struct android_pipe *pipe, u32 cmd)
+{
 	unsigned long flags;
 	u32 status;
-	struct goldfish_pipe_dev *dev = pipe->dev;
+	struct android_pipe_dev *dev = pipe->dev;
 
 	spin_lock_irqsave(&dev->lock, flags);
 	writel((u32)(u64)pipe, dev->base + PIPE_REG_CHANNEL);
@@ -171,10 +172,10 @@ static u32 goldfish_cmd_status(struct goldfish_pipe *pipe, u32 cmd)
 	return status;
 }
 
-static void goldfish_cmd(struct goldfish_pipe *pipe, u32 cmd)
-{ 
+static void android_cmd(struct android_pipe *pipe, u32 cmd)
+{
 	unsigned long flags;
-	struct goldfish_pipe_dev *dev = pipe->dev;
+	struct android_pipe_dev *dev = pipe->dev;
 
 	spin_lock_irqsave(&dev->lock, flags);
 	writel((u32)(u64)pipe, dev->base + PIPE_REG_CHANNEL);
@@ -188,7 +189,7 @@ static void goldfish_cmd(struct goldfish_pipe *pipe, u32 cmd)
 /* This function converts an error code returned by the emulator through
  * the PIPE_REG_STATUS i/o register into a valid negative errno value.
  */
-static int goldfish_pipe_error_convert(int status)
+static int android_pipe_error_convert(int status)
 {
 	switch (status) {
 	case PIPE_ERROR_AGAIN:
@@ -206,7 +207,7 @@ static int goldfish_pipe_error_convert(int status)
  * Notice: QEMU will return 0 for un-known register access, indicating
  * param_acess is supported or not
  */
-static int valid_batchbuffer_addr(struct goldfish_pipe_dev *dev,
+static int valid_batchbuffer_addr(struct android_pipe_dev *dev,
 				  struct access_params *aps)
 {
 	u32 aph, apl;
@@ -222,7 +223,7 @@ static int valid_batchbuffer_addr(struct goldfish_pipe_dev *dev,
 
 /* 0 on success */
 static int setup_access_params_addr(struct platform_device *pdev,
-					struct goldfish_pipe_dev *dev)
+					struct android_pipe_dev *dev)
 {
 	u64 paddr;
 	struct access_params *aps;
@@ -245,9 +246,9 @@ static int setup_access_params_addr(struct platform_device *pdev,
 
 /* A value that will not be set by qemu emulator */
 #define INITIAL_BATCH_RESULT (0xdeadbeaf)
-static int access_with_param(struct goldfish_pipe_dev *dev, const int cmd,
+static int access_with_param(struct android_pipe_dev *dev, const int cmd,
 				unsigned long address, unsigned long avail,
-				struct goldfish_pipe *pipe, int *status)
+				struct android_pipe *pipe, int *status)
 {
 	struct access_params *aps = dev->aps;
 
@@ -273,12 +274,12 @@ static int access_with_param(struct goldfish_pipe_dev *dev, const int cmd,
 /* This function is used for both reading from and writing to a given
  * pipe.
  */
-static ssize_t goldfish_pipe_read_write(struct file *filp, char __user *buffer,
+static ssize_t android_pipe_read_write(struct file *filp, char __user *buffer,
 				    size_t bufflen, int is_write)
 {
 	unsigned long irq_flags;
-	struct goldfish_pipe *pipe = filp->private_data;
-	struct goldfish_pipe_dev *dev = pipe->dev;
+	struct android_pipe *pipe = filp->private_data;
+	struct android_pipe_dev *dev = pipe->dev;
 	const int cmd_offset = is_write ? 0
 					: (CMD_READ_BUFFER - CMD_WRITE_BUFFER);
 	unsigned long address, address_end;
@@ -369,7 +370,7 @@ static ssize_t goldfish_pipe_read_write(struct file *filp, char __user *buffer,
 		*/
 		if (status != PIPE_ERROR_AGAIN ||
 			(filp->f_flags & O_NONBLOCK) != 0) {
-			ret = goldfish_pipe_error_convert(status);
+			ret = android_pipe_error_convert(status);
 			break;
 		}
 
@@ -380,7 +381,7 @@ static ssize_t goldfish_pipe_read_write(struct file *filp, char __user *buffer,
 		set_bit(wakeBit, &pipe->flags);
 
 		/* Tell the emulator we're going to wait for a wake event */
-		goldfish_cmd(pipe, CMD_WAKE_ON_WRITE + cmd_offset);
+		android_cmd(pipe, CMD_WAKE_ON_WRITE + cmd_offset);
 
 		/* Unlock the pipe, then wait for the wake signal */
 		mutex_unlock(&pipe->lock);
@@ -406,24 +407,24 @@ static ssize_t goldfish_pipe_read_write(struct file *filp, char __user *buffer,
 	return ret;
 }
 
-static ssize_t goldfish_pipe_read(struct file *filp, char __user *buffer,
+static ssize_t android_pipe_read(struct file *filp, char __user *buffer,
 			      size_t bufflen, loff_t *ppos)
 {
-	return goldfish_pipe_read_write(filp, buffer, bufflen, 0);
+	return android_pipe_read_write(filp, buffer, bufflen, 0);
 }
 
-static ssize_t goldfish_pipe_write(struct file *filp,
+static ssize_t android_pipe_write(struct file *filp,
 				const char __user *buffer, size_t bufflen,
 				loff_t *ppos)
 {
-	return goldfish_pipe_read_write(filp, (char __user *)buffer,
+	return android_pipe_read_write(filp, (char __user *)buffer,
 								bufflen, 1);
 }
 
 
-static unsigned int goldfish_pipe_poll(struct file *filp, poll_table *wait)
+static unsigned int android_pipe_poll(struct file *filp, poll_table *wait)
 {
-	struct goldfish_pipe *pipe = filp->private_data;
+	struct android_pipe *pipe = filp->private_data;
 	unsigned int mask = 0;
 	int status;
 
@@ -431,7 +432,7 @@ static unsigned int goldfish_pipe_poll(struct file *filp, poll_table *wait)
 
 	poll_wait(filp, &pipe->wake_queue, wait);
 
-	status = goldfish_cmd_status(pipe, CMD_POLL);
+	status = android_cmd_status(pipe, CMD_POLL);
 
 	mutex_unlock(&pipe->lock);
 
@@ -450,9 +451,9 @@ static unsigned int goldfish_pipe_poll(struct file *filp, poll_table *wait)
 	return mask;
 }
 
-static irqreturn_t goldfish_pipe_interrupt(int irq, void *dev_id)
+static irqreturn_t android_pipe_interrupt(int irq, void *dev_id)
 {
-	struct goldfish_pipe_dev *dev = dev_id;
+	struct android_pipe_dev *dev = dev_id;
 	unsigned long irq_flags;
 	int count = 0;
 
@@ -463,7 +464,7 @@ static irqreturn_t goldfish_pipe_interrupt(int irq, void *dev_id)
 	spin_lock_irqsave(&dev->lock, irq_flags);
 	for (;;) {
 		/* First read the channel, 0 means the end of the list */
-		struct goldfish_pipe *pipe;
+		struct android_pipe *pipe;
 		unsigned long wakes;
 		unsigned long channel = 0;
 
@@ -480,7 +481,7 @@ static irqreturn_t goldfish_pipe_interrupt(int irq, void *dev_id)
 
 		/* Convert channel to struct pipe pointer + read wake flags */
 		wakes = readl(dev->base + PIPE_REG_WAKES);
-		pipe  = (struct goldfish_pipe *)(ptrdiff_t)channel;
+		pipe  = (struct android_pipe *)(ptrdiff_t)channel;
 
 		/* Did the emulator just closed a pipe? */
 		if (wakes & PIPE_WAKE_CLOSED) {
@@ -501,20 +502,20 @@ static irqreturn_t goldfish_pipe_interrupt(int irq, void *dev_id)
 }
 
 /**
- *	goldfish_pipe_open	-	open a channel to the AVD
+ *	android_pipe_open	-	open a channel to the AVD
  *	@inode: inode of device
  *	@file: file struct of opener
  *
  *	Create a new pipe link between the emulator and the use application.
  *	Each new request produces a new pipe.
  *
- *	Note: we use the pipe ID as a mux. All goldfish emulations are 32bit
+ *	Note: we use the pipe ID as a mux. All android emulations are 32bit
  *	right now so this is fine. A move to 64bit will need this addressing
  */
-static int goldfish_pipe_open(struct inode *inode, struct file *file)
+static int android_pipe_open(struct inode *inode, struct file *file)
 {
-	struct goldfish_pipe *pipe;
-	struct goldfish_pipe_dev *dev = pipe_dev;
+	struct android_pipe *pipe;
+	struct android_pipe_dev *dev = pipe_dev;
 	int32_t status;
 
 	/* Allocate new pipe kernel object */
@@ -531,7 +532,7 @@ static int goldfish_pipe_open(struct inode *inode, struct file *file)
 	 * pipe object's address as the channel identifier for simplicity.
 	 */
 
-	status = goldfish_cmd_status(pipe, CMD_OPEN);
+	status = android_cmd_status(pipe, CMD_OPEN);
 	if (status < 0) {
 		kfree(pipe);
 		return status;
@@ -542,37 +543,37 @@ static int goldfish_pipe_open(struct inode *inode, struct file *file)
 	return 0;
 }
 
-static int goldfish_pipe_release(struct inode *inode, struct file *filp)
+static int android_pipe_release(struct inode *inode, struct file *filp)
 {
-	struct goldfish_pipe *pipe = filp->private_data;
+	struct android_pipe *pipe = filp->private_data;
 
 	/* The guest is closing the channel, so tell the emulator right now */
-	goldfish_cmd(pipe, CMD_CLOSE);
+	android_cmd(pipe, CMD_CLOSE);
 	kfree(pipe);
 	filp->private_data = NULL;
 	return 0;
 }
 
-static const struct file_operations goldfish_pipe_fops = {
+static const struct file_operations android_pipe_fops = {
 	.owner = THIS_MODULE,
-	.read = goldfish_pipe_read,
-	.write = goldfish_pipe_write,
-	.poll = goldfish_pipe_poll,
-	.open = goldfish_pipe_open,
-	.release = goldfish_pipe_release,
+	.read = android_pipe_read,
+	.write = android_pipe_write,
+	.poll = android_pipe_poll,
+	.open = android_pipe_open,
+	.release = android_pipe_release,
 };
 
-static struct miscdevice goldfish_pipe_device = {
+static struct miscdevice android_pipe_device = {
 	.minor = MISC_DYNAMIC_MINOR,
-	.name = "goldfish_pipe",
-	.fops = &goldfish_pipe_fops,
+	.name = "android_pipe",
+	.fops = &android_pipe_fops,
 };
 
-static int goldfish_pipe_probe(struct platform_device *pdev)
+static int android_pipe_probe(struct platform_device *pdev)
 {
 	int err;
 	struct resource *r;
-	struct goldfish_pipe_dev *dev = pipe_dev;
+	struct android_pipe_dev *dev = pipe_dev;
 
 	/* not thread safe, but this should not happen */
 	WARN_ON(dev->base != NULL);
@@ -597,14 +598,14 @@ static int goldfish_pipe_probe(struct platform_device *pdev)
 	}
 	dev->irq = r->start;
 
-	err = devm_request_irq(&pdev->dev, dev->irq, goldfish_pipe_interrupt,
-				IRQF_SHARED, "goldfish_pipe", dev);
+	err = devm_request_irq(&pdev->dev, dev->irq, android_pipe_interrupt,
+				IRQF_SHARED, "android_pipe", dev);
 	if (err) {
 		dev_err(&pdev->dev, "unable to allocate IRQ\n");
 		goto error;
 	}
 
-	err = misc_register(&goldfish_pipe_device);
+	err = misc_register(&android_pipe_device);
 	if (err) {
 		dev_err(&pdev->dev, "unable to register device\n");
 		goto error;
@@ -617,22 +618,31 @@ error:
 	return err;
 }
 
-static int goldfish_pipe_remove(struct platform_device *pdev)
+static int android_pipe_remove(struct platform_device *pdev)
 {
-	struct goldfish_pipe_dev *dev = pipe_dev;
-	misc_deregister(&goldfish_pipe_device);
+	struct android_pipe_dev *dev = pipe_dev;
+	misc_deregister(&android_pipe_device);
 	dev->base = NULL;
 	return 0;
 }
 
-static struct platform_driver goldfish_pipe = {
-	.probe = goldfish_pipe_probe,
-	.remove = goldfish_pipe_remove,
+static const struct of_device_id android_pipe_of_match[] = {
+	{ .compatible = "generic,android-pipe", },
+	{},
+};
+MODULE_DEVICE_TABLE(of, android_pipe_of_match);
+
+
+static struct platform_driver android_pipe = {
+	.probe = android_pipe_probe,
+	.remove = android_pipe_remove,
 	.driver = {
-		.name = "goldfish_pipe"
+		.name = "android_pipe",
+		.owner = THIS_MODULE,
+		.of_match_table = android_pipe_of_match,
 	}
 };
 
-module_platform_driver(goldfish_pipe);
+module_platform_driver(android_pipe);
 MODULE_AUTHOR("David Turner <digit@google.com>");
 MODULE_LICENSE("GPL");
